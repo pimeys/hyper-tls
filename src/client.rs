@@ -4,22 +4,25 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use hyper::client::connect::{Connect, Connected, Destination, HttpConnector};
+use hyper::client::connect::{Connected, Destination, HttpConnector};
 pub use native_tls::Error;
+use tokio::net::TcpStream;
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_tls::TlsConnector;
+//use tokio_net::tcp::TcpStream;
+use tower_service::Service;
 
 use crate::stream::MaybeHttpsStream;
 
 /// A Connector for the `https` scheme.
 #[derive(Clone)]
-pub struct HttpsConnector<T> {
+pub struct HttpsConnector {
     force_https: bool,
-    http: T,
+    http: HttpConnector,
     tls: TlsConnector,
 }
 
-impl HttpsConnector<HttpConnector> {
+impl HttpsConnector {
     /// Construct a new HttpsConnector.
     ///
     /// Takes number of DNS worker threads.
@@ -45,23 +48,8 @@ impl HttpsConnector<HttpConnector> {
     }
 }
 
-impl<T> HttpsConnector<T> {
-    /// Force the use of HTTPS when connecting.
-    ///
-    /// If a URL is not `https` when connecting, an error is returned.
-    pub fn https_only(&mut self, enable: bool) {
-        self.force_https = enable;
-    }
-
-    #[doc(hidden)]
-    #[deprecated(since = "0.3", note = "use `https_only` method instead")]
-    pub fn force_https(&mut self, enable: bool) {
-        self.force_https = enable;
-    }
-}
-
-impl<T> From<(T, TlsConnector)> for HttpsConnector<T> {
-    fn from(args: (T, TlsConnector)) -> HttpsConnector<T> {
+impl From<(HttpConnector, TlsConnector)> for HttpsConnector {
+    fn from(args: (HttpConnector, TlsConnector)) -> HttpsConnector {
         HttpsConnector {
             force_https: false,
             http: args.0,
@@ -70,7 +58,7 @@ impl<T> From<(T, TlsConnector)> for HttpsConnector<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for HttpsConnector<T> {
+impl fmt::Debug for HttpsConnector {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("HttpsConnector")
             .field("force_https", &self.force_https)
@@ -79,16 +67,20 @@ impl<T: fmt::Debug> fmt::Debug for HttpsConnector<T> {
     }
 }
 
-impl<T> Connect for HttpsConnector<T>
-where
-    T: Connect<Error = io::Error> + Send + Sync,
-    T::Future: 'static,
-{
-    type Transport = MaybeHttpsStream<T::Transport>;
+impl Service<Destination> for HttpsConnector {
+    type Response = (MaybeHttpsStream<TcpStream>, Connected);
     type Error = io::Error;
-    type Future = HttpsConnecting<T::Transport>;
+    type Future = HttpsConnecting<TcpStream>;
 
-    fn connect(&self, dst: Destination) -> Self::Future {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // For now, always ready.
+        // TODO: When `Resolve` becomes an alias for `Service`, check
+        // the resolver's readiness.
+        drop(cx);
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, dst: Destination) -> Self::Future {
         let is_https = dst.scheme() == "https";
         // Early abort if HTTPS is forced but can't be used
         if !is_https && self.force_https {
@@ -100,10 +92,17 @@ where
         }
 
         let host = dst.host().to_owned();
-        let connecting = self.http.connect(dst);
+        let connecting = self.http.call(dst);
         let tls = self.tls.clone();
+
         let fut = async move {
-            let (tcp, connected) = connecting.await?;
+            let (tcp, connected) = connecting.await.map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("HTTP Connection failed: {:?}", e),
+                )
+            })?;
+
             let maybe = if is_https {
                 let tls = tls
                     .connect(&host, tcp)
@@ -113,8 +112,10 @@ where
             } else {
                 MaybeHttpsStream::Http(tcp)
             };
+
             Ok((maybe, connected))
         };
+
         HttpsConnecting(Box::pin(fut))
     }
 }

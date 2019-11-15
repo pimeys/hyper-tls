@@ -15,9 +15,11 @@ vendored = ["native-tls/vendored"]
 
 [dependencies]
 native-tls = "0.2"
-hyper = { version = "=0.13.0-alpha.4", default-features = false, features = ["tcp"] }
+hyper = { git = "https://github.com/hyperium/hyper/", default-features = false, features = ["tcp"] }
+tower-service = "=0.3.0-alpha.2"
 tokio-io = "=0.2.0-alpha.6"
 tokio-tls = "=0.3.0-alpha.6"
+tokio = "=0.2.0-alpha.6"
 
 [dev-dependencies]
 tokio = "=0.2.0-alpha.6"
